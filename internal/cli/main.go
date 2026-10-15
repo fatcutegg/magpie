@@ -302,6 +302,14 @@ func run(args []string) error {
 		}
 		return runGUI(false, args[0])
 	}
+	// how this process was started, for the Routing page of another magpie on
+	// this machine to name the one that serves the gateway (#110)
+	switch args[0] {
+	case "tui", "web", "serve", "tray":
+		gateway.Serves = args[0]
+	case "app", "gui", "panel", "-Embedding":
+		gateway.Serves = "app"
+	}
 	switch args[0] {
 	case "tui":
 		return runTUI()

@@ -178,6 +178,15 @@ recorded as a prediction failure (`noPrediction`).
 
 ## Remote magpie APIs
 
+`GET /v1/magpie/trace` answers the routing this gateway has decided, for a
+magpie on the same computer that does not serve it, whose console plays it as
+its own Routing page (#110). It is read over loopback alone: a request from
+another address is refused 403, as `/v1/magpie/concurrency` is. It answers
+what `Server.Trace` holds, so a caller long-polls it with `after` and `wait`
+the way the page's own `/api/gateway/trace` does. `Server.gatewayTrace` in
+[`trace.go`](../../internal/gateway/trace.go), and `TestGatewayTraceIsLoopbackOnly`
+in [`trace_peer_test.go`](../../internal/gateway/trace_peer_test.go).
+
 A remote provider serves the conversation, token-counting, System One,
 embeddings, rerank, speech-to-text, image generation/edit and video
 creation/status/content APIs. Gemini clients enter through the local Gemini adapter and follow the

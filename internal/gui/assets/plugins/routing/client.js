@@ -3460,7 +3460,15 @@ function routingPage(part) {
     }
   }
 
-  function hubText() { setText(hubSub, (providers?.gateway?.url || "").replace(/^https?:\/\//, "") || t("gateway")); }
+  function hubText() {
+    const g = providers?.gateway;
+    // which magpie is routing, when it isn't this one (#110): this page plays
+    // that magpie's routing, and its window is the other place it shows
+    const who = g && g.running && !g.mine && g.serves
+      ? t("{serves} (pid {pid}) is routing", { serves: g.serves, pid: g.pid }) + " · "
+      : "";
+    setText(hubSub, who + ((g?.url || "").replace(/^https?:\/\//, "") || t("gateway")));
+  }
 
   // labels in the page's language, and again when it changes
   function words() {
