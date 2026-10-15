@@ -10,8 +10,11 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -625,6 +628,93 @@ func (t *trace) update(r *Route, f func(r *Route)) {
 
 // Trace is the routes changed after seq, oldest first. With none, it waits
 // up to wait for one.
+// gatewayTrace tells this gateway's routing to another magpie on the same
+// computer, which does not serve the gateway and so has no trace of its own
+// (#110: the trace is the serving process's, and a second magpie showed none
+// of it). Its console reads this to show the same Routing page, and names
+// this process with what answers here. This computer alone: the trace names
+// accounts, what they served and why they rest.
+func (s *Server) gatewayTrace(w http.ResponseWriter, r *http.Request) {
+	if !local(r) {
+		writeError(w, provider.Chat, http.StatusForbidden, "magpie's routing is told to this computer alone")
+		return
+	}
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	var wait time.Duration
+	if r.URL.Query().Get("wait") != "" {
+		wait = 25 * time.Second
+	}
+	st := s.Trace(r.Context(), after, wait)
+	writeJSON(w, 200, map[string]any{"object": "trace", "now": time.Now(), "seq": st.Seq, "routes": st.Routes, "totals": st.Totals})
+}
+
+// OwnerTrace reads the routing the magpie serving the gateway's address has
+// decided, for a magpie on this computer that doesn't serve it: its console
+// reads this and shows the same Routing page (#110: the trace is the serving
+// process's alone, so a second magpie showed none of it). ok is false when
+// nothing answers there, or a magpie too old to tell its trace.
+func OwnerTrace(ctx context.Context, after int64, wait time.Duration) (TraceState, bool) {
+	q := url.Values{}
+	if after > 0 {
+		q.Set("after", strconv.FormatInt(after, 10))
+	}
+	if wait > 0 {
+		q.Set("wait", "1")
+	}
+	c := &http.Client{Timeout: wait + 20*time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, URL()+"/v1/magpie/trace?"+q.Encode(), nil)
+	if err != nil {
+		return TraceState{}, false
+	}
+	res, err := c.Do(req)
+	if err != nil {
+		return TraceState{}, false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return TraceState{}, false
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if err != nil {
+		return TraceState{}, false
+	}
+	var out struct {
+		Seq    int64   `json:"seq"`
+		Routes []Route `json:"routes"`
+		Totals Totals  `json:"totals"`
+	}
+	if decodeJSON(b, &out) != nil {
+		return TraceState{}, false
+	}
+	return TraceState{Seq: out.Seq, Routes: out.Routes, Totals: out.Totals}, true
+}
+
+// OwnerLanes reads the lanes of the magpie serving the gateway's address, for
+// a console that doesn't serve it (the providers' rows show the same pills
+// wherever the gateway runs). ok is false when nothing answers there.
+func OwnerLanes() (map[string]Lane, bool) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	res, err := c.Get(URL() + "/v1/magpie/concurrency")
+	if err != nil {
+		return nil, false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return nil, false
+	}
+	var out struct {
+		Data map[string]Lane `json:"data"`
+	}
+	if decodeJSON(b, &out) != nil || out.Data == nil {
+		return nil, false
+	}
+	return out.Data, true
+}
+
 func (s *Server) Trace(ctx context.Context, after int64, wait time.Duration) TraceState {
 	t := &s.trace
 	deadline := time.NewTimer(wait)
