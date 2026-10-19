@@ -35,6 +35,36 @@ FrierenF on Discord). A run as anyone else has its env as before. Only the
 bridge's run gets it; the warm-up and `/usage` runs don't skip
 permissions.
 
+Every Claude Code magpie starts for the subscription (a turn's run, the
+warm-up and model test `askClaude`, `/usage`, and the sign-in's
+`auth login` and `auth status`) is given its proxy through one helper,
+`claudeCLI.proxied` in each package, which is
+`netproxy.EnvForBunWith`: the account's own proxy, else the
+subscription's, else the global one (`netproxy.EnvWith`), with a SOCKS5
+proxy replaced by magpie's loopback HTTP bridge to it (`netproxy.Bridge`,
+as for every bun magpie starts, #1409). Claude Code is built with Bun,
+which takes only http:// and https:// proxies: given `socks5://`, every
+request failed as `UnsupportedProxyProtocol`, after about three minutes of
+Claude Code's own retries, as a 502 (#2651). A Claude Code in a WSL
+distro that doesn't share Windows' loopback (`wslrun.Tool.Host` set)
+can't reach the bridge, so there, and where the bridge can't start, a
+SOCKS proxy is refused before Claude Code starts, with an error that says
+to use an http:// proxy. The `settings.json` env that magpie writes for the
+user's own Claude Code sessions leaves a SOCKS proxy out (see
+[Providers and accounts](providers-accounts.md)).
+
+The helper offers each of the client's tools under `bridgeToolName`
+(`bridgeTools`), which Claude Code calls `mcp__magpie__<name>`. Claude Code
+keeps only `[A-Za-z0-9_-]` of an MCP tool's name, so a name it would change
+(`spawn.agent`, `fs/read`), one longer than 51 (64 with the prefix) or one
+ending as a changed name ends (`_` and 12 hex digits) is cut, made of those
+characters and given a hash of the whole name: unique (`a.b` and `a_b`
+stay apart), the same in every run, so a resumed session, the history
+(`renderParts`) and the tool-choice line (`toolChoiceAsk`) name it as the
+run was offered it. `subscriptionRun.names` (`bridgeNames`) maps it back
+to the declared name in `toolStart`, for streamed and whole messages, and
+in `mcpCall` (#2649).
+
 The run's MCP server is magpie itself (`magpie claude-mcp-helper`,
 `internal/claudebridge`), which hands each tool call back to the gateway
 at `POST /_magpie/claude-mcp/<token>` (`mcpCall`), where the call is
@@ -129,6 +159,40 @@ output. If selection takes longer, the gateway logs the missing report
 and sends keepalives without the dropped-mark header. Later fallback can
 also change the selected run after headers have been sent. Reporting never
 fails the request or delays an ordinary request's keepalives.
+
+## The caller's instructions as the system prompt (`claudeLeanPrompt`)
+
+Every run is the real Claude Code. By default it keeps Claude Code's own
+system prompt, and the caller's instructions go in the run's first user
+message inside `<external_system_instructions>`. Settings › Models ›
+Replies › Short Claude system prompt (`claudeLeanPrompt`, off by default)
+starts a run with `--system-prompt-file` instead. The file is `system.md`
+in the run's temp folder, under the distro's mount in WSL (`claudeCLI.file`).
+It holds `leanSystem`: the caller's instructions without a client Claude
+Code's billing line, plus the tool-choice line. The first message then holds
+the conversation alone. Claude Code still sends its billing block and its
+identity line, so requests come from the real binary. They no longer carry
+Claude Code's prompt, and that is the ban risk the setting names.
+
+A request with client cache marks (#1717) is never lean: its system marks
+are placed in the first message. The mode is part of the run's identity
+(`cacheIdentity`, and the tool-results check in `serveSubscription`), so a
+run started in one mode never takes a turn of the other. After the setting
+changes, the next turn starts a run with the rendered history.
+
+Measured on 2026-10-16 with a real Claude subscription on Sonnet 5.5,
+Claude Code 2.1.301:
+
+| Client | Off | On |
+| --- | --- | --- |
+| Chat client, ~600-token prompt, 2 tools, 3 turns | 10,048 input tokens | 6,580 (−35%) |
+| `claude -p` as the client, Read and Bash, 4 requests | 85,453 / 85,471 | 81,948 / 81,977 (−4%) |
+
+The saving is a fixed ~0.9–1.2K tokens a request. It is large for light
+clients and small for clients with Claude Code-sized prompts. Without any
+tool, Claude Code's built-in tools are already off (`--tools ""`). A run
+told the whole conversation again costs far more, because it writes the
+history to the 1h cache at 2×.
 
 ## Runtime path for a new turn
 
@@ -478,7 +542,12 @@ carries none.
 
 ```sh
 go test -tags nogui ./internal/gateway/ -run '^TestClaudeClientCache' -count=1
+go test -tags nogui ./internal/gateway/ -run '^TestClaudeLeanPrompt' -count=1
 go test -tags nogui ./internal/claudecode/ -count=1
+go test -tags nogui ./internal/gateway/ -run '^TestClaudeCodeGivenTheBridgeForASOCKSProxy$' -count=1
+go test -tags nogui ./internal/provider/ -run '^TestClaudeSignInBridgesASOCKSProxy$' -count=1
+go test -tags nogui ./internal/netproxy/ -run '^TestEnvForBunWith' -count=1
+go test -tags nogui ./internal/gateway/ -run '^TestClaudeToolNamesComeBackAsDeclared$' -count=1
 go test -tags nogui ./internal/gateway/ -run 'ClaudeSubscriptionRunsTheDownloaded|ClaudeSubscriptionWithoutClaudeCode|ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeHistoryCachedAcrossNewRuns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy|ClaudeIdle|ClaudeSideQuestion|ClaudeNoRunSaysWhy|ClaudeToolResultsNoRunSaysWhy|ClaudePromptToldUserText|ClaudePromptKeepsInstructions|ClaudeToolResultsGoOnWithTheUsersWords|ClaudeToolResultsKeepInstructions|ToolResultKeepsUserTextSentMidTurn' -count=1
 ```
 

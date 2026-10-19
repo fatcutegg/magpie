@@ -64,6 +64,7 @@ import (
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/wslrun"
 )
 
@@ -147,6 +148,9 @@ type subscriptionRun struct {
 
 	// the tools its agent was told of, as it started and since
 	tools map[string]bool
+	// names is the caller's name of each tool by the name the run's agent
+	// has it under (bridgeToolName), for those it differs: under r.mu
+	names map[string]string
 
 	mu sync.Mutex
 	// sending is held across a send to the segment and taken before it is
@@ -165,6 +169,7 @@ type subscriptionRun struct {
 	safeguards    json.RawMessage
 	safeguardBeta string
 	clientMarks   bool
+	lean          bool // started with leanSystem as its system prompt
 	cacheTail     string
 	cachePrefix   cachePrefix
 	timer         *time.Timer
@@ -535,6 +540,23 @@ func (c claudeCLI) env(env []string, configDir string) []string {
 	return c.wsl.Env(env, names...)
 }
 
+// proxied is env told the proxy a run for ctx goes through (claudeProxy),
+// a SOCKS one bridged: Claude Code is built with Bun, which takes only
+// http:// and https:// proxies (#2651). One in a WSL distro reaches the
+// bridge only when the distro shares Windows' loopback.
+func (c claudeCLI) proxied(ctx context.Context, env []string) ([]string, error) {
+	return netproxy.EnvForBunWith(claudeProxy(ctx), env, c.wsl == nil || c.wsl.Host == "")
+}
+
+// file is where this Claude Code reads a file of magpie's at path: one in
+// WSL under the distro's mount of the drive.
+func (c claudeCLI) file(path string) string {
+	if c.wsl != nil {
+		return c.wsl.Linux(path)
+	}
+	return path
+}
+
 // exe is magpie's own executable, as this Claude Code starts it.
 func (c claudeCLI) exe() (string, error) {
 	if c.wsl != nil {
@@ -619,6 +641,16 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		"magpie": map[string]any{"command": exe, "args": []string{"claude-mcp-helper", callbackPath, toolsPath}},
 	}})
 	args := claudeCLIArgs(model, string(mcpConfig), req.Effort, req.WebSearch)
+	if req.leanPrompt {
+		// in a file of the run's own: instructions can be longer than
+		// Windows lets a command line be
+		systemPath := filepath.Join(tmp, "system.md")
+		if err := os.WriteFile(systemPath, []byte(leanSystem(req)), 0o600); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		args = append(args, "--system-prompt-file", binary.file(systemPath))
+	}
 	if req.ThinkOff {
 		// the client turned thinking off, as Claude Code's auto mode
 		// classifier and its small asks do: a run at Claude Code's own
@@ -675,7 +707,11 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	}
 	cmd := binary.command(context.Background(), args...)
 	cmd.Dir = work
-	env := netproxy.EnvWith(claudeProxy(ctx), cleanClaudeEnv(os.Environ()))
+	env, err := binary.proxied(ctx, cleanClaudeEnv(os.Environ()))
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
 	if req.clientCache != nil {
 		env = append(env, "DISABLE_PROMPT_CACHING=1")
 	}
@@ -706,8 +742,10 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
 
 	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Format.schema()) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner, effort: req.Effort, sessions: sessions}
+	run.names = bridgeNames(req.Tools)
 	run.safeguardBeta = req.SafeguardBeta
 	run.clientMarks = req.clientCache != nil
+	run.lean = req.leanPrompt
 	run.cachePrefix = prefix
 	if user, _ := ownerAccount(owner); user != "" {
 		run.loginVersion = provider.ClaudeLoginVersion(user)
@@ -2084,6 +2122,7 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 		}
 		name, ok := strings.CutPrefix(name, "mcp__magpie__")
 		r.mu.Lock()
+		name = declaredName(r.names, name)
 		search := r.search != nil && name == r.searchName
 		r.mu.Unlock()
 		// magpie answers its own web search, as Claude Code does
@@ -2539,7 +2578,8 @@ func (u cliUsage) gateway() Usage {
 func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 	var blocks []map[string]any
 	var text strings.Builder
-	if req.System != "" || req.ToolChoice == "required" || strings.HasPrefix(req.ToolChoice, "name:") {
+	// a lean run has them as its system prompt (leanSystem)
+	if !req.leanPrompt && (req.System != "" || req.ToolChoice == "required" || strings.HasPrefix(req.ToolChoice, "name:")) {
 		text.WriteString("<external_system_instructions>\n")
 		system := withoutBillingHeader(req.System)
 		pos := 0
@@ -2558,12 +2598,7 @@ func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 			}
 		}
 		text.WriteString(system[pos:])
-		switch {
-		case req.ToolChoice == "required":
-			text.WriteString("\nYou must call at least one available tool before answering.")
-		case strings.HasPrefix(req.ToolChoice, "name:"):
-			fmt.Fprintf(&text, "\nYou must call the %s tool.", bridgeName(strings.TrimPrefix(req.ToolChoice, "name:")))
-		}
+		text.WriteString(toolChoiceAsk(req))
 		text.WriteString("\n</external_system_instructions>\n\n")
 		// The caller's instructions are a block of their own, marked for the
 		// cache: Claude Code marks only the end of the message, so with them
@@ -2650,6 +2685,27 @@ func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 	return closeBlocks(blocks, &text), nil
 }
 
+// toolChoiceAsk is the client's tool choice in words, which Claude Code
+// takes no flag for.
+func toolChoiceAsk(req *Request) string {
+	switch {
+	case req.ToolChoice == "required":
+		return "\nYou must call at least one available tool before answering."
+	case strings.HasPrefix(req.ToolChoice, "name:"):
+		return fmt.Sprintf("\nYou must call the %s tool.", bridgeName(strings.TrimPrefix(req.ToolChoice, "name:")))
+	}
+	return ""
+}
+
+// leanSystem is a lean run's system prompt (ClaudeLeanPrompt): the
+// caller's instructions without the client Claude Code's billing line, as
+// renderClaudePrompt tells them to a run that keeps Claude Code's own,
+// with its tool choice. Claude Code still puts its billing line and its
+// identity line before it, and marks it for the cache itself.
+func leanSystem(req *Request) string {
+	return strings.TrimSpace(withoutBillingHeader(req.System) + toolChoiceAsk(req))
+}
+
 // historyChunk is how many messages of the history renderClaudePrompt puts
 // in a block. Blocks end at the same messages in every run told the same
 // conversation, so their text is the same; 20 blocks back from a run's
@@ -2726,7 +2782,53 @@ func historyEnd(msgs []Message) int {
 // "Bash is disabled for this session, in subagents as well as here.",
 // which the model takes for a fact and gives up (#958).
 func bridgeName(name string) string {
-	return "mcp__magpie__" + name
+	return "mcp__magpie__" + bridgeToolName(name)
+}
+
+// bridgeToolName is the name the MCP helper offers a tool of the caller's
+// under. Claude Code takes an MCP tool's name as [A-Za-z0-9_-] only, with
+// mcp__magpie__ before it in at most 64: it made "spawn.agent" its
+// spawn_agent, which the client never offered (#2649). A name it would
+// change, or one ending as a changed name ends, is told apart by a hash of
+// it, the same in every run, so a resumed session and a conversation's
+// history name the tool as before; declaredName maps it back.
+func bridgeToolName(name string) string {
+	if bridgeToolNameOK.MatchString(name) && !bridgeToolNameHashed.MatchString(name) {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	short := bridgeToolNameBad.ReplaceAllString(name, "_")
+	if len(short) > 38 {
+		short = short[:38]
+	}
+	return short + "_" + hex.EncodeToString(sum[:6])
+}
+
+var (
+	bridgeToolNameOK     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,51}$`)
+	bridgeToolNameBad    = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+	bridgeToolNameHashed = regexp.MustCompile(`_[0-9a-f]{12}$`)
+)
+
+// bridgeNames is the caller's name of each of tools by the name the MCP
+// helper offers it under, for those that differ (bridgeToolName).
+func bridgeNames(tools []Tool) map[string]string {
+	names := map[string]string{}
+	for _, t := range tools {
+		if b := bridgeToolName(t.Name); b != t.Name {
+			names[b] = t.Name
+		}
+	}
+	return names
+}
+
+// declaredName is the caller's name of the tool the run's agent called
+// name, by the names it was offered under (bridgeNames).
+func declaredName(names map[string]string, name string) string {
+	if n, ok := names[name]; ok {
+		return n
+	}
+	return name
 }
 
 // offeredTools is the names of the caller's tools, whose past calls a run
@@ -3391,6 +3493,7 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run.mu.Lock()
+	call.Name = declaredName(run.names, call.Name)
 	search, searchName := run.search, run.searchName
 	run.mu.Unlock()
 	if search != nil && call.Name == searchName {
@@ -3951,6 +4054,9 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	if req.clientCache != nil {
 		req.clientCache.report = func() { cacheReportReady(w, req) }
 	}
+	// a client that places its own cache marks keeps Claude Code's prompt:
+	// its system marks are placed in the run's first message (#1717)
+	req.leanPrompt = name == "Claude Code" && req.clientCache == nil && settings.Load().ClaudeLeanPrompt
 	if req.Format != nil && req.Format.schema() == nil {
 		// --json-schema takes a schema only: any JSON object is asked for
 		// in words
@@ -3987,6 +4093,9 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	// and the fork died with it (ylorn on Discord).
 	if run != nil && run.clientMarks != (req.clientCache != nil) {
 		run, how = nil, "cache mode changed"
+	}
+	if run != nil && run.lean != req.leanPrompt {
+		run, how = nil, "system prompt mode changed"
 	}
 	if run != nil && !run.claimResume() {
 		run, how = nil, answeredElsewhere
@@ -4031,6 +4140,10 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 			for _, t := range req.Tools {
 				run.tools[t.Name] = true
 			}
+			if run.names == nil {
+				run.names = map[string]string{}
+			}
+			maps.Copy(run.names, bridgeNames(req.Tools))
 			run.mu.Unlock()
 		}
 		if err == nil {
@@ -4261,7 +4374,7 @@ func bridgeTools(req *Request) []bridgeTool {
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
-		tools = append(tools, bridgeTool{Name: t.Name, Description: t.Description, InputSchema: schema})
+		tools = append(tools, bridgeTool{Name: bridgeToolName(t.Name), Description: t.Description, InputSchema: schema})
 	}
 	return tools
 }
