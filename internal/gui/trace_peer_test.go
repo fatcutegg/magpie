@@ -48,7 +48,7 @@ func TestConsoleShowsTheServingMagpiesRouting(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	var got struct {
-		Mine   bool `json:"mine"`
+		Live   bool `json:"live"`
 		Routes []struct {
 			Model  string `json:"model"`
 			Status int    `json:"status"`
@@ -57,8 +57,8 @@ func TestConsoleShowsTheServingMagpiesRouting(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.Mine || len(got.Routes) != 1 || got.Routes[0].Model != "ollama/gemma4:e4b" || got.Routes[0].Status != 200 {
-		t.Fatalf("the serving magpie's routing was not shown: mine %v routes %+v", got.Mine, got.Routes)
+	if !got.Live || len(got.Routes) != 1 || got.Routes[0].Model != "ollama/gemma4:e4b" || got.Routes[0].Status != 200 {
+		t.Fatalf("the serving magpie's routing was not shown: live %v routes %+v", got.Live, got.Routes)
 	}
 
 	// the state names it, for the page's heading to say which one is routing
@@ -103,13 +103,13 @@ func TestConsoleKeepsTheNoticeFromAnOlderGateway(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	var got struct {
-		Mine   bool            `json:"mine"`
+		Live   bool            `json:"live"`
 		Routes json.RawMessage `json:"routes"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Mine {
+	if got.Live {
 		t.Fatalf("an older gateway's routing was played as this console's own: %s", w.Body)
 	}
 }

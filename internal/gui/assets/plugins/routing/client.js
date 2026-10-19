@@ -1057,7 +1057,7 @@ function routingPage(part) {
   // ---------- state ----------
 
   const routes = new Map(); // id → the latest of each route
-  let seq = 0, mine = true, loaded = false, daysAt = 0;
+  let seq = 0, live = true, loaded = false, daysAt = 0;
   let traceTotals = { requests: 0, rerouted: 0, errors: 0 };
   let offMsg = ""; // why the trace can't be watched here, when it can't
   // the request the window was opened on (?req=), from the tray panel
@@ -3384,10 +3384,10 @@ function routingPage(part) {
         const d = await res.json();
         noteAccounts(d);
         skew = at(d.now) - Date.now();
-        mine = d.mine;
+        live = d.live;
         hubText();
         traceTotals = d.totals || traceTotals;
-        if (!mine) {
+        if (!live) {
           const gw = providers?.gateway;
           offMsg = !gw?.running ? "The gateway isn't running, so nothing is routed."
             : gw.window ? "Another magpie serves the gateway; its routing plays live in that magpie's window."
