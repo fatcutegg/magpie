@@ -10,7 +10,7 @@ import (
 )
 
 // A magpie here that does not serve the gateway shows the routing of the one
-// that does (#110), and names it: the console reads the serving magpie's
+// that does (#2606), and names it: the console reads the serving magpie's
 // trace over loopback and plays it as its own, and its state carries how that
 // magpie was started and its pid.
 func TestConsoleShowsTheServingMagpiesRouting(t *testing.T) {
@@ -31,7 +31,7 @@ func TestConsoleShowsTheServingMagpiesRouting(t *testing.T) {
 		case "/":
 			w.Write([]byte(`{"name":"magpie","version":"0.1.1257","models":3,"window":true,"serves":"serve","pid":4321,"apis":[]}`))
 		case "/v1/magpie/trace":
-			w.Write([]byte(`{"object":"trace","seq":7,"routes":[{"id":1,"model":"ollama/gemma4:e4b","provider":"ollama","status":200}]}`))
+			w.Write([]byte(`{"object":"trace","seq":7,"pid":4321,"serves":"serve","routes":[{"id":1,"model":"ollama/gemma4:e4b","provider":"ollama","status":200}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -48,7 +48,11 @@ func TestConsoleShowsTheServingMagpiesRouting(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	var got struct {
-		Live   bool `json:"live"`
+		Mine bool `json:"mine"`
+		By   *struct {
+			Pid    int    `json:"pid"`
+			Serves string `json:"serves"`
+		} `json:"by"`
 		Routes []struct {
 			Model  string `json:"model"`
 			Status int    `json:"status"`
@@ -57,8 +61,13 @@ func TestConsoleShowsTheServingMagpiesRouting(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.Live || len(got.Routes) != 1 || got.Routes[0].Model != "ollama/gemma4:e4b" || got.Routes[0].Status != 200 {
-		t.Fatalf("the serving magpie's routing was not shown: live %v routes %+v", got.Live, got.Routes)
+	if !got.Mine || len(got.Routes) != 1 || got.Routes[0].Model != "ollama/gemma4:e4b" || got.Routes[0].Status != 200 {
+		t.Fatalf("the serving magpie's routing was not shown: mine %v routes %+v", got.Mine, got.Routes)
+	}
+	// the trace names the magpie it came from, so the page's name for it
+	// changes with the trace when another magpie takes the gateway over
+	if got.By == nil || got.By.Pid != 4321 || got.By.Serves != "serve" {
+		t.Errorf("the trace doesn't name the magpie it came from: %+v", got.By)
 	}
 
 	// the state names it, for the page's heading to say which one is routing
@@ -103,13 +112,13 @@ func TestConsoleKeepsTheNoticeFromAnOlderGateway(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	var got struct {
-		Live   bool            `json:"live"`
+		Mine   bool            `json:"mine"`
 		Routes json.RawMessage `json:"routes"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Live {
+	if got.Mine {
 		t.Fatalf("an older gateway's routing was played as this console's own: %s", w.Body)
 	}
 }

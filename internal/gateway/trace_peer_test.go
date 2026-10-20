@@ -3,11 +3,12 @@ package gateway
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
 // The routing is this process's own, so a magpie on this computer that does
-// not serve the gateway reads it here to show the same Routing page (#110).
+// not serve the gateway reads it here to show the same Routing page (#2606).
 // It answers this computer alone: the trace names accounts and what they
 // served, and the magpie that reads it is on the same machine.
 func TestGatewayTraceIsLoopbackOnly(t *testing.T) {
@@ -25,12 +26,33 @@ func TestGatewayTraceIsLoopbackOnly(t *testing.T) {
 			Object string            `json:"object"`
 			Seq    int64             `json:"seq"`
 			Routes []json.RawMessage `json:"routes"`
+			Pid    int               `json:"pid"`
+			Serves string            `json:"serves"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
 		if got.Object != "trace" || got.Routes == nil {
 			t.Fatalf("object %q routes %v", got.Object, got.Routes)
+		}
+		// the console names the magpie routing from the trace it plays
+		if got.Pid != os.Getpid() || got.Serves != Serves {
+			t.Errorf("the trace doesn't name its magpie: pid %d serves %q", got.Pid, got.Serves)
+		}
+	})
+
+	// a proxy or tunnel on this computer (cloudflared, Tailscale serve)
+	// hands on someone else's request from loopback
+	t.Run("through a proxy here", func(t *testing.T) {
+		for _, hdr := range []string{"X-Forwarded-For", "Cf-Connecting-IP", "Tailscale-User-Login"} {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/v1/magpie/trace", nil)
+			r.RemoteAddr = "127.0.0.1:50123"
+			r.Header.Set(hdr, "203.0.113.7")
+			h.ServeHTTP(w, r)
+			if w.Code != 403 {
+				t.Fatalf("a request a proxy handed on (%s) reached the trace: %d %s", hdr, w.Code, w.Body)
+			}
 		}
 	})
 
@@ -43,34 +65,35 @@ func TestGatewayTraceIsLoopbackOnly(t *testing.T) {
 			t.Fatalf("another machine reached the trace: %d %s", w.Code, w.Body)
 		}
 	})
+}
 
-	// A proxy or tunnel on this computer reaches the gateway on loopback
-	// (#1022: a Cloudflare Tunnel to 127.0.0.1:3425), so its request is
-	// someone else's and is turned away like another machine's.
-	for _, passed := range []struct{ name, header, value string }{
-		{"a forwarded request", "X-Forwarded-For", "203.0.113.9"},
-		{"a standard forwarded header", "Forwarded", "for=203.0.113.9"},
-		{"tailscale serve", "Tailscale-User-Login", "someone@example.com"},
+// Another magpie's trace is read from this computer alone (#2606): an
+// address on another interface or host is never asked, whatever
+// MAGPIE_ADDR says, and one listening everywhere is read on loopback.
+func TestOwnerReadOnLoopbackAlone(t *testing.T) {
+	for addr, want := range map[string]string{
+		"127.0.0.1:3561":   "http://127.0.0.1:3561",
+		"0.0.0.0:3561":     "http://127.0.0.1:3561",
+		":3561":            "http://127.0.0.1:3561",
+		"[::]:3561":        "http://127.0.0.1:3561",
+		"localhost:3561":   "http://127.0.0.1:3561",
+		"[::1]:3561":       "http://[::1]:3561",
+		"127.0.0.2:3561":   "http://127.0.0.2:3561",
+		"192.168.1.9:3561": "",
+		"10.0.0.5:3561":    "",
+		"example.com:3561": "",
+		"magpie.tail:3561": "",
 	} {
-		t.Run(passed.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			r := httptest.NewRequest("GET", "/v1/magpie/trace", nil)
-			r.RemoteAddr = "127.0.0.1:50123"
-			r.Header.Set(passed.header, passed.value)
-			h.ServeHTTP(w, r)
-			if w.Code != 403 {
-				t.Fatalf("a request %s passed on reached the trace: %d %s", passed.header, w.Code, w.Body)
-			}
-		})
-	}
-
-	t.Run("ipv6 loopback", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		r := httptest.NewRequest("GET", "/v1/magpie/trace", nil)
-		r.RemoteAddr = "[::1]:50123"
-		h.ServeHTTP(w, r)
-		if w.Code != 200 {
-			t.Fatalf("this computer's own request was turned away: %d %s", w.Code, w.Body)
+		t.Setenv("MAGPIE_ADDR", addr)
+		if got := ownerURL(); got != want {
+			t.Errorf("MAGPIE_ADDR %s: read at %q, want %q", addr, got, want)
 		}
-	})
+	}
+	t.Setenv("MAGPIE_ADDR", "192.0.2.1:3561")
+	if _, ok := OwnerTrace(t.Context(), 0, 0); ok {
+		t.Error("a trace read from another host")
+	}
+	if _, ok := OwnerLanes(); ok {
+		t.Error("lanes read from another host")
+	}
 }

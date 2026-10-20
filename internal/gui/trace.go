@@ -18,7 +18,7 @@ import (
 // traceJSON is the gateway's routing trace since the page last asked.
 type traceJSON struct {
 	gateway.TraceState
-	Live   bool        `json:"live"` // the trace here is live: this magpie serves the gateway, or this console reads the magpie that does (#110); gatewayJSON.Mine says the other thing, that this console serves
+	Mine   bool        `json:"mine"` // the trace here is live: this magpie serves the gateway, or this console reads the magpie that does (#2606)
 	Now    time.Time   `json:"now"`
 	Routes []routeJSON `json:"routes"`
 }
@@ -271,7 +271,7 @@ func traceRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /api/gateway/trace", func(rw http.ResponseWriter, r *http.Request) {
 		gw := served.Load()
-		out := traceJSON{TraceState: gateway.TraceState{Routes: []gateway.Route{}}, Live: gw != nil}
+		out := traceJSON{TraceState: gateway.TraceState{Routes: []gateway.Route{}}, Mine: gw != nil}
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 		var wait time.Duration
 		if r.URL.Query().Get("wait") != "" {
@@ -282,9 +282,9 @@ func traceRoutes(mux *http.ServeMux) {
 		} else if st, ok := gateway.OwnerTrace(r.Context(), after, wait); ok {
 			// another magpie on this computer serves the gateway: show the
 			// routing it decides here too, live, and let the page name the
-			// process that is routing (#110)
+			// process that is routing (#2606)
 			out.TraceState = st
-			out.Live = true
+			out.Mine = true
 		}
 		out.Now = time.Now()
 		out.Routes = pricedRoutes(out.TraceState.Routes)
